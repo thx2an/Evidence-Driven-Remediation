@@ -1,210 +1,208 @@
 # FINDINGS.md — Evidence-Driven Remediation Engine
 
-> All numbers below are taken directly from the committed `audit.jsonl`
-> (run with `python engine.py decide ...` on E01–E08). They are
-> reproducible from the evidence blocks in that file.
+> Tất cả số liệu bên dưới được lấy trực tiếp từ file `audit.jsonl` đã commit
+> (chạy bằng `python engine.py decide ...` trên E01–E08). Chúng có thể tái lập
+> được từ các khối `evidence` trong file đó.
 
-## 1. Which similarity function did you choose for Layer 2, and why?
+## 1. Which similarity function did you choose for Layer 2, and why? *(Bạn chọn hàm độ tương đồng nào cho Layer 2, và tại sao?)*
 
-I chose a **weighted hybrid similarity** combining three components, plus a
-coherence penalty:
+Tôi chọn một **độ tương đồng lai có trọng số (weighted hybrid similarity)** kết
+hợp ba thành phần, cộng thêm một hình phạt về tính nhất quán (coherence penalty):
 
-| Component | Weight | Method |
+| Thành phần | Trọng số | Phương pháp |
 |-----------|--------|--------|
-| Log similarity | 0.40 | IDF-weighted coverage of historical log signatures found (as substrings) in the live raw messages |
-| Trace similarity | 0.35 | Edge-match score: match historical trace edges to live anomalous edges by `(from,to)` pair, score by error-rate closeness |
-| Service overlap | 0.25 | Jaccard index on affected-service sets |
+| Log similarity | 0.40 | Độ phủ có trọng số IDF của các log signature lịch sử tìm thấy (dưới dạng substring) trong các message thô của incident hiện tại |
+| Trace similarity | 0.35 | Điểm khớp cạnh (edge-match): khớp các cạnh trace lịch sử với các cạnh bất thường hiện tại theo cặp `(from,to)`, chấm điểm theo độ gần của error-rate |
+| Service overlap | 0.25 | Chỉ số Jaccard trên tập service bị ảnh hưởng |
 
-**Key design choice — IDF-weighted log matching.** Generic signatures like
-`"degraded behavior detected"` appear in **15/29** historical entries
-(IDF = ln(29/15)+1 ≈ **1.66**), while specific ones like
-`"ConnectionPool: timeout acquiring connection"` appear in only **3/29**
-(IDF ≈ **3.27**). Without IDF weighting, generic signatures would make every
-incident look similar to half the corpus. (Both numbers verified against
-`incidents_history.json`, n=29.)
+**Lựa chọn thiết kế then chốt — khớp log có trọng số IDF.** Những signature
+chung chung như `"degraded behavior detected"` xuất hiện trong **15/29** mục
+lịch sử (IDF = ln(29/15)+1 ≈ **1.66**), trong khi những signature đặc thù như
+`"ConnectionPool: timeout acquiring connection"` chỉ xuất hiện ở **3/29**
+(IDF ≈ **3.27**). Nếu không có trọng số IDF, các signature chung chung sẽ khiến
+mọi incident trông giống một nửa corpus. (Cả hai con số đã được kiểm chứng lại
+với `incidents_history.json`, n=29.)
 
-**Alternative considered — Cosine similarity on TF-IDF vectors.** I considered
-encoding both live and historical incidents as TF-IDF vectors over normalised
-log templates and computing cosine distance. I rejected it because:
-1. The corpus has only 29 entries — too few to build a meaningful vocabulary;
-   a high-dimensional TF-IDF vector would overfit on so few neighbours.
-2. Substring containment directly leverages the fact that historical
-   `log_signatures` are *cleaned templates* while live logs are *raw messages*.
-   Cosine would require converting both to one representation first, adding a
-   fragile step.
+**Phương án đã cân nhắc — Cosine similarity trên vector TF-IDF.** Tôi đã cân
+nhắc mã hóa cả incident hiện tại lẫn incident lịch sử thành vector TF-IDF trên
+các log template đã chuẩn hóa rồi tính khoảng cách cosine. Tôi loại bỏ nó vì:
+1. Corpus chỉ có 29 mục — quá ít để xây một bộ từ vựng có ý nghĩa; vector
+   TF-IDF nhiều chiều sẽ overfit với số neighbour ít ỏi như vậy.
+2. Khớp substring (substring containment) tận dụng trực tiếp việc
+   `log_signatures` lịch sử là *template đã làm sạch* còn log hiện tại là
+   *message thô*. Cosine sẽ đòi hỏi quy cả hai về cùng một biểu diễn trước,
+   thêm một bước dễ vỡ.
 
-**Empirical validation.** On **E01** (pool exhaustion) the hybrid similarity
-ranks `INC-2025-11-08` (connection_pool_exhaustion, success) at the top with
-**sim = 0.641**, well clear of the next neighbours which drop to **0.247**
-(`INC-2025-09-05` / `INC-2026-05-10`, same class) and **0.158**
-(`INC-2025-07-04`, lock_contention — a *different* class). A pure log-only
-similarity would not separate E01 from E06 nearly as cleanly, because E06's
-logs *also* contain pool-exhaustion lines.
+**Kiểm chứng thực nghiệm.** Trên **E01** (pool exhaustion), độ tương đồng lai
+xếp `INC-2025-11-08` (connection_pool_exhaustion, success) ở vị trí đầu với
+**sim = 0.641**, bỏ xa các neighbour tiếp theo chỉ còn **0.247**
+(`INC-2025-09-05` / `INC-2026-05-10`, cùng class) và **0.158**
+(`INC-2025-07-04`, lock_contention — một class *khác*). Một độ tương đồng chỉ
+dựa trên log sẽ không tách E01 khỏi E06 sạch sẽ như vậy, vì log của E06 *cũng*
+chứa các dòng pool-exhaustion.
 
-**Coherence penalty.** When the live incident has a strong dominant trace
-anomaly (`error_rate > 0.15`) but a historical entry's trace signatures don't
-match that dominant edge, similarity is multiplied by **×0.55**. This is what
-handles **E06**: the dominant live anomaly is `cart-svc → cart-redis`
-(`error_rate = 0.21`, `p99_deviation_ratio = 5.96`), but the high-log-match
-`connection_pool_exhaustion` history entries all describe `checkout → payment`
-edges, so they are penalised — their similarity drops to **0.38 / 0.36**
-instead of dominating on log match alone.
+**Hình phạt coherence.** Khi incident hiện tại có một bất thường trace nổi trội
+mạnh (`error_rate > 0.15`) nhưng các trace signature của một mục lịch sử lại
+không khớp với cạnh nổi trội đó, độ tương đồng bị nhân **×0.55**. Đây chính là
+cách xử lý **E06**: bất thường nổi trội của incident là `cart-svc → cart-redis`
+(`error_rate = 0.21`, `p99_deviation_ratio = 5.96`), nhưng các mục lịch sử
+`connection_pool_exhaustion` có log khớp cao lại đều mô tả cạnh
+`checkout → payment`, nên bị phạt — độ tương đồng của chúng tụt xuống
+**0.38 / 0.36** thay vì áp đảo chỉ nhờ khớp log.
 
 ---
 
-## 2. How does outcome-weighted voting change the candidate ranking versus a pure-similarity ranking?
+## 2. How does outcome-weighted voting change the candidate ranking versus a pure-similarity ranking? *(Bỏ phiếu có trọng số theo kết quả làm thay đổi xếp hạng ứng viên thế nào so với xếp hạng thuần theo độ tương đồng?)*
 
-**Outcome weights:** `success = 1.0`, `partial = 0.40`, `failed = 0.05`.
-**Vote weight:** `vote_weight = similarity² × outcome_weight`
-(`similarity²` amplifies the top match and suppresses distant neighbours).
+**Trọng số theo kết quả:** `success = 1.0`, `partial = 0.40`, `failed = 0.05`.
+**Trọng số phiếu:** `vote_weight = similarity² × outcome_weight`
+(`similarity²` khuếch đại match đứng đầu và triệt tiêu các neighbour ở xa).
 
-**Concrete example — E01, where outcome weighting flips the *shipped* action.**
+**Ví dụ cụ thể — E01, nơi việc đánh trọng số theo kết quả làm *đảo* action được chọn để ship.**
 
-E01's voting neighbours (sim ≥ 0.10) and the actions each contributes:
+Các neighbour bỏ phiếu của E01 (sim ≥ 0.10) và action mà mỗi neighbour đóng góp:
 
-| Neighbour | sim | outcome | actions contributed |
+| Neighbour | sim | outcome | action đóng góp |
 |-----------|-----|---------|---------------------|
 | INC-2025-11-08 | 0.641 | success | rollback_service, increase_pool_size |
 | INC-2025-09-05 | 0.247 | success | rollback_service, increase_pool_size |
-| INC-2026-05-10 | 0.247 | **partial** | rollback_service *(only)* |
+| INC-2026-05-10 | 0.247 | **partial** | rollback_service *(chỉ mỗi cái này)* |
 | INC-2025-07-04 | 0.158 | success | restart_pod |
 | INC-2026-02-22 | 0.140 | success | page_oncall |
 
-The only difference between `rollback_service` and `increase_pool_size` is the
-**partial-outcome** neighbour `INC-2026-05-10`, which used rollback *alone* and
-only partially resolved the incident.
+Khác biệt duy nhất giữa `rollback_service` và `increase_pool_size` là neighbour
+**kết quả partial** `INC-2026-05-10`, vốn chỉ dùng rollback *một mình* và chỉ
+giải quyết được incident một phần.
 
-| Action | Pure-similarity raw vote (Σ sim²) | Outcome-weighted raw vote (Σ sim²·w) |
+| Action | Phiếu thô thuần-tương-đồng (Σ sim²) | Phiếu thô có trọng số kết quả (Σ sim²·w) |
 |--------|-----------------------------------|--------------------------------------|
 | `rollback_service` | 0.4105 + 0.0611 + 0.0611 = **0.533** | 0.4105 + 0.0611 + (0.0611×0.4) = **0.496** |
 | `increase_pool_size` | 0.4105 + 0.0611 = **0.472** | 0.4105 + 0.0611 = **0.472** |
 
-The partial discount shrinks rollback's lead over increase from **0.061**
-(pure) to **0.024** (weighted). That compression is decisive once Layer 3
-applies cost:
+Việc chiết khấu phiếu partial thu hẹp khoảng cách dẫn trước của rollback so với
+increase từ **0.061** (thuần) xuống **0.024** (có trọng số). Sự thu hẹp này trở
+nên quyết định khi Layer 3 áp chi phí vào:
 
-- **Pure-similarity** → confidences `rollback 0.508 / increase 0.450` →
-  EU `rollback 0.459` vs `increase 0.435` → **rollback ships**.
-- **Outcome-weighted** → confidences `rollback 0.490 / increase 0.466` →
-  EU `increase 0.451` vs `rollback 0.443` → **increase_pool_size ships**.
+- **Thuần-tương-đồng** → confidence `rollback 0.508 / increase 0.450` →
+  EU `rollback 0.459` so với `increase 0.435` → **rollback được ship**.
+- **Có trọng số kết quả** → confidence `rollback 0.490 / increase 0.466` →
+  EU `increase 0.451` so với `rollback 0.443` → **increase_pool_size được ship**.
 
-So outcome weighting does more than re-score: by discounting the lone
-partial-outcome rollback, it lets the **cheaper** `increase_pool_size`
-(cost 1, downtime 0) overtake the costlier `rollback_service` (cost 10,
-downtime 2) on expected utility. Both are accepted actions for E01, so the
-decision stays correct — but the action the engine actually ships changes.
+Vậy việc đánh trọng số theo kết quả làm nhiều hơn là chỉ chấm lại điểm: bằng
+cách chiết khấu phiếu rollback partial đơn lẻ đó, nó cho phép `increase_pool_size`
+**rẻ hơn** (cost 1, downtime 0) vượt qua `rollback_service` đắt hơn (cost 10,
+downtime 2) về expected utility. Cả hai đều là action được chấp nhận cho E01,
+nên quyết định vẫn đúng — nhưng action mà engine thực sự ship thì đã thay đổi.
 
 ---
 
-## 3. For one eval incident, explain the EV calculation in full
+## 3. For one eval incident, explain the EV calculation in full *(Với một incident trong tập eval, giải thích đầy đủ phép tính EV.)*
 
-**E01 — connection pool exhaustion → ships `increase_pool_size`.**
+**E01 — connection pool exhaustion → ship `increase_pool_size`.**
 
-### Candidate set from Layer 2 (outcome-weighted confidence)
+### Tập ứng viên từ Layer 2 (confidence có trọng số kết quả)
 
-| Action | Confidence | Raw score |
+| Action | Confidence | Điểm thô |
 |--------|-----------|-----------|
 | `rollback_service`   | 0.4901 | 0.496 |
 | `increase_pool_size` | 0.4660 | 0.472 |
 | `restart_pod`        | 0.0246 | 0.025 |
 | `page_oncall`        | 0.0194 | 0.020 |
 
-### EU formula: `EU = confidence × (1 − cost_penalty / 3)`
+### Công thức EU: `EU = confidence × (1 − cost_penalty / 3)`
 
-where `cost_penalty = 0.30·(cost/20) + 0.30·(downtime/10) + 0.40·(blast/5)`,
-and `page_oncall` uses a fixed opportunity cost of `0.35`.
+trong đó `cost_penalty = 0.30·(cost/20) + 0.30·(downtime/10) + 0.40·(blast/5)`,
+và `page_oncall` dùng một chi phí cơ hội cố định là `0.35`.
 
-| Action | Confidence | cost_penalty | EU | Blast gate |
+| Action | Confidence | cost_penalty | EU | Cổng blast |
 |--------|-----------|-------------|-----|-----------|
 | `increase_pool_size` | 0.466 | 0.095 | 0.466 × (1 − 0.0317) = **0.4512** | PASS (blast=1) |
 | `rollback_service`   | 0.490 | 0.290 | 0.490 × (1 − 0.0967) = **0.4427** | PASS (blast=1) |
 | `page_oncall`        | 0.019 | 0.350 | 0.019 × (1 − 0.1167) = **0.0171** | PASS (blast=0) |
-| `restart_pod`        | 0.025 | —      | — | **REJECTED** (conf 0.02 < 0.25, blast=1) |
+| `restart_pod`        | 0.025 | —      | — | **BỊ LOẠI** (conf 0.02 < 0.25, blast=1) |
 
-**cost_penalty for `rollback_service`:** cost 10/20 = 0.50, downtime 2/10 = 0.20,
+**cost_penalty của `rollback_service`:** cost 10/20 = 0.50, downtime 2/10 = 0.20,
 blast 1/5 = 0.20 → 0.30·0.50 + 0.30·0.20 + 0.40·0.20 = 0.15 + 0.06 + 0.08 = **0.29**.
-**cost_penalty for `increase_pool_size`:** cost 1/20 = 0.05, downtime 0,
+**cost_penalty của `increase_pool_size`:** cost 1/20 = 0.05, downtime 0,
 blast 1/5 = 0.20 → 0.30·0.05 + 0.40·0.20 = 0.015 + 0.08 = **0.095**.
 
-**Winner:** `increase_pool_size` with **EU = 0.4512**, beating
-`rollback_service` (EU = 0.4427) by **0.0085**. The slim margin reflects the
-design: confidence is dominant, cost is a moderate tiebreaker. `rollback` has
-marginally higher confidence but a much higher cost penalty (0.29 vs 0.095), so
-the cheaper action wins.
+**Người thắng:** `increase_pool_size` với **EU = 0.4512**, hơn
+`rollback_service` (EU = 0.4427) đúng **0.0085**. Khoảng cách sít sao này phản
+ánh đúng thiết kế: confidence là tín hiệu chủ đạo, cost chỉ là yếu tố phá hòa ở
+mức vừa phải. `rollback` có confidence nhỉnh hơn một chút nhưng cost_penalty cao
+hơn hẳn (0.29 so với 0.095), nên action rẻ hơn thắng.
 
-**page_oncall:** despite zero infrastructure cost, the injected opportunity
-cost (0.35, representing ~30 min human MTTR) plus its tiny confidence (0.019)
-leave it at EU = 0.017 — correctly never competitive on a well-understood
-incident.
+**page_oncall:** dù chi phí hạ tầng bằng 0, chi phí cơ hội được tiêm vào
+(0.35, đại diện cho ~30 phút MTTR của con người) cộng với confidence rất nhỏ
+(0.019) khiến nó chỉ đạt EU = 0.017 — đúng đắn là không bao giờ cạnh tranh được
+trên một incident đã hiểu rõ.
 
 ---
 
-## 4. When did your engine choose to escalate (page_oncall) instead of auto-act?
+## 4. When did your engine choose to escalate (page_oncall) instead of auto-act? *(Khi nào engine chọn leo thang (page_oncall) thay vì tự hành động?)*
 
-My engine escalated on **6 of 8** eval incidents. Crucially, escalation arises
-from **three distinct mechanisms**, not one — and only two of the six are
-genuine OOD:
+Engine của tôi leo thang trên **6/8** incident eval. Quan trọng là: việc leo
+thang phát sinh từ **ba cơ chế khác biệt**, không phải một — và chỉ hai trong
+sáu trường hợp là OOD thực sự:
 
-| Incident | conf | max_sim | Why it escalated | Correct? |
+| Incident | conf | max_sim | Vì sao leo thang | Đúng? |
 |----------|------|---------|------------------|----------|
-| **E02** | 0.698 | 0.488 | **History says page.** Top match `INC-2025-08-17` (tls_expiry, success) was itself resolved by `page_oncall`, so page collects the votes; all auto-actions fall below the 0.25 blast gate. | TLS rotation is cert-ops, human-only |
-| **E04** | 0.136 | 0.136 | **OOD.** `max_similarity 0.136 < 0.25` → forced escalation. | expected accepts page (or dns_config_rollback) |
-| **E05** | 0.008 | 0.602 | **Conflict + blast gate.** Not OOD, but top-4 mixes `connection_pool_exhaustion` with `lock_contention` (`INC-2025-07-04`, sim 0.586) → conflict dampening ×0.55 drops every auto-action below 0.25 → only page survives the gate. | expected accepts page (or rollback:payment-svc) |
-| **E06** | 0.083 | 0.377 | **Conflict + coherence penalty + blast gate.** Logs say payment-svc (pool exhaustion); dominant trace says `cart-svc → cart-redis`. Coherence penalty + conflict dampening drop the pool-exhaustion actions below the gate. | expected accepts page (or restart:cart-svc) |
-| **E07** | 1.000 | 0.426 | **History says page.** Top match `INC-2025-10-15` (infinite_retry, success) was resolved by `page_oncall`; it is the only candidate. *(Not OOD — sim 0.426 is above threshold.)* | expected accepts page only |
-| **E08** | 0.052 | 0.052 | **OOD.** `max_similarity 0.052 < 0.25`, zero candidates → forced escalation. | expected accepts page (or rollback:t24-service) |
+| **E02** | 0.698 | 0.488 | **Lịch sử bảo page.** Match đầu bảng `INC-2025-08-17` (tls_expiry, success) bản thân nó được giải bằng `page_oncall`, nên page gom hết phiếu; mọi auto-action rớt xuống dưới cổng blast 0.25. | TLS rotation là việc cert-ops, chỉ con người làm được |
+| **E04** | 0.136 | 0.136 | **OOD.** `max_similarity 0.136 < 0.25` → buộc leo thang. | đáp án chấp nhận page (hoặc dns_config_rollback) |
+| **E05** | 0.008 | 0.602 | **Xung đột + cổng blast.** Không phải OOD, nhưng top-4 trộn `connection_pool_exhaustion` với `lock_contention` (`INC-2025-07-04`, sim 0.586) → conflict dampening ×0.55 kéo mọi auto-action xuống dưới 0.25 → chỉ page sống sót qua cổng. | đáp án chấp nhận page (hoặc rollback:payment-svc) |
+| **E06** | 0.083 | 0.377 | **Xung đột + coherence penalty + cổng blast.** Log nói payment-svc (pool exhaustion); trace nổi trội nói `cart-svc → cart-redis`. Coherence penalty + conflict dampening kéo các action pool-exhaustion xuống dưới cổng. | đáp án chấp nhận page (hoặc restart:cart-svc) |
+| **E07** | 1.000 | 0.426 | **Lịch sử bảo page.** Match đầu bảng `INC-2025-10-15` (infinite_retry, success) được giải bằng `page_oncall`; nó là ứng viên duy nhất. *(Không phải OOD — sim 0.426 cao hơn ngưỡng.)* | đáp án chỉ chấp nhận page |
+| **E08** | 0.052 | 0.052 | **OOD.** `max_similarity 0.052 < 0.25`, không có ứng viên nào → buộc leo thang. | đáp án chấp nhận page (hoặc rollback:t24-service) |
 
-All six escalations are correct against the eval ground truth.
+Cả sáu quyết định leo thang đều đúng so với ground truth của eval.
 
-**Where escalation was correctly avoided:** **E01** (clear pool exhaustion,
-conf 0.466 → `increase_pool_size`) and **E03** (clear memory leak, conf 0.987 →
-`rollback_service`). Both carry `must_not_action: page_oncall`, so escalating
-would have been penalised — the engine auto-acts on both.
+**Nơi leo thang được né đúng đắn:** **E01** (pool exhaustion rõ ràng,
+conf 0.466 → `increase_pool_size`) và **E03** (memory leak rõ ràng, conf 0.987 →
+`rollback_service`). Cả hai đều mang `must_not_action: page_oncall`, nên nếu leo
+thang sẽ bị trừ điểm — engine tự hành động trên cả hai.
 
-**Design note worth flagging:** only **E04** and **E08** trip the explicit OOD
-path. E05/E06 escalate because the blast-radius gate (and conflict dampening)
-reject every auto-action, and E02/E07 escalate because the matched historical
-incident was *itself* resolved by paging. This is the desirable behaviour —
-the engine reaches "page" through evidence, not as a blind default — but it
-means "escalation" is not synonymous with "novel input" in this engine.
+**Ghi chú thiết kế đáng nêu:** chỉ **E04** và **E08** kích hoạt đường OOD tường
+minh. E05/E06 leo thang vì cổng blast-radius (và conflict dampening) loại mọi
+auto-action, còn E02/E07 leo thang vì incident lịch sử được match *bản thân nó*
+đã được giải bằng cách page. Đây là hành vi mong muốn — engine đi tới "page" qua
+bằng chứng, chứ không phải mặc định mù quáng — nhưng điều đó nghĩa là "leo thang"
+trong engine này không đồng nghĩa với "input mới lạ".
 
 ---
 
-## 5. What is the most likely class of incident that breaks your engine?
+## 5. What is the most likely class of incident that breaks your engine? *(Lớp incident nào nhiều khả năng làm hỏng engine của bạn nhất?)*
 
-**Class: incidents with a *known failure pattern* but *novel service
-topology*.**
+**Lớp: incident có *mẫu lỗi đã biết* nhưng *topology service mới lạ*.**
 
-**E08 illustrates it.** It is a 4-service cascade where the true root is the
-deepest leaf (`t24-service`), but the services (`t24-service`, `bb-edge`,
-`datapower`) never appear in the historical corpus. My engine scores it at
-`max_similarity = 0.052` and escalates via the OOD path. That is *acceptable*
-(page is an accepted action), but not *ideal*: a smarter engine would
-recognise the *shape* — cascade from deep leaf to alerting edge — even when the
-service names differ, and could propose `rollback_service:t24-service` (also
-accepted).
+**E08 minh họa điều này.** Đó là một cascade 4 service trong đó gốc thật là leaf
+sâu nhất (`t24-service`), nhưng các service (`t24-service`, `bb-edge`,
+`datapower`) chưa từng xuất hiện trong corpus lịch sử. Engine của tôi chấm nó
+ở `max_similarity = 0.052` và leo thang qua đường OOD. Như vậy là *chấp nhận
+được* (page là một action được chấp nhận), nhưng không *lý tưởng*: một engine
+thông minh hơn sẽ nhận ra *hình dạng* — cascade từ leaf sâu lên edge phát alert —
+ngay cả khi tên service khác nhau, và có thể đề xuất `rollback_service:t24-service`
+(cũng được chấp nhận).
 
-**Concrete failure scenario.** An `inventory-svc` connection-pool exhaustion
-would match the pool-exhaustion log signatures, but every historical
-pool-exhaustion entry targets `payment-svc`. The log component (weight 0.40)
-would fire, but the trace component (0.35, edge-match) and service Jaccard
-(0.25) would both collapse because no historical edge mentions
-`inventory-svc`. Similarity would land in the 0.10–0.20 band — right on the
-0.25 OOD boundary — and the engine could under-weigh a genuinely known
-incident.
+**Kịch bản thất bại cụ thể.** Một sự cố connection-pool exhaustion trên
+`inventory-svc` sẽ khớp các log signature pool-exhaustion, nhưng mọi mục
+pool-exhaustion lịch sử đều nhắm vào `payment-svc`. Thành phần log (trọng số
+0.40) sẽ kích hoạt, nhưng thành phần trace (0.35, edge-match) và service Jaccard
+(0.25) sẽ cùng sụp đổ vì không cạnh lịch sử nào nhắc tới `inventory-svc`. Độ
+tương đồng sẽ rơi vào dải 0.10–0.20 — ngay sát ranh giới OOD 0.25 — và engine có
+thể đánh giá thấp một incident thực ra đã biết.
 
-**Proposed improvement I did not implement — service-role normalisation.**
-Instead of matching service names literally (Jaccard over `affected_services`
-and exact edge-match in trace similarity), map each service to its *role* in
-the topology (e.g. "api-tier caller", "datastore backend", "edge proxy") and
-compute similarity over roles. Then `inventory-svc → catalog-db` would match
-`payment-svc → payments-db` because both are "api → store". I did not implement
-it because:
-1. The corpus is small (29 entries) — role-based matching risks
-   over-generalising and would need a larger validation set to tune safely.
-2. The current approach already reaches **8/8 accepted, 0 forbidden** on the
-   eval set; the marginal value of role normalisation is unverifiable without
-   more test incidents.
-3. Time budget: extracting roles from topology and rewiring all three
-   similarity components (plus the coherence check) is a non-trivial refactor
-   of both the feature and retrieval layers.
+**Cải tiến đề xuất nhưng tôi chưa triển khai — chuẩn hóa theo vai trò service
+(service-role normalisation).** Thay vì khớp tên service theo nghĩa đen (Jaccard
+trên `affected_services` và edge-match chính xác trong trace similarity), hãy ánh
+xạ mỗi service về *vai trò* của nó trong topology (ví dụ "api-tier caller",
+"datastore backend", "edge proxy") rồi tính độ tương đồng trên vai trò. Khi đó
+`inventory-svc → catalog-db` sẽ khớp với `payment-svc → payments-db` vì cả hai
+đều là "api → store". Tôi chưa triển khai vì:
+1. Corpus nhỏ (29 mục) — khớp theo vai trò có nguy cơ tổng quát hóa quá đà và
+   cần một tập kiểm chứng lớn hơn để tinh chỉnh an toàn.
+2. Cách tiếp cận hiện tại đã đạt **8/8 được chấp nhận, 0 forbidden** trên tập
+   eval; giá trị biên của role normalisation không kiểm chứng được nếu không có
+   thêm incident thử nghiệm.
+3. Ngân sách thời gian: trích vai trò từ topology và đấu lại cả ba thành phần
+   tương đồng (cộng với cả phần kiểm tra coherence) là một cuộc tái cấu trúc
+   không nhỏ ở cả feature layer lẫn retrieval layer.
