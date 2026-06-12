@@ -1,8 +1,5 @@
 # FINDINGS.md — Evidence-Driven Remediation Engine
 
-> Tất cả số liệu bên dưới được lấy trực tiếp từ file `audit.jsonl` đã commit
-> (chạy bằng `python engine.py decide ...` trên E01–E08). Chúng có thể tái lập
-> được từ các khối `evidence` trong file đó.
 
 ## 1. Which similarity function did you choose for Layer 2, and why? *(Bạn chọn hàm độ tương đồng nào cho Layer 2, và tại sao?)*
 
