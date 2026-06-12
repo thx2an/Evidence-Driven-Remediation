@@ -2,7 +2,7 @@
 
 Usage
 -----
-    python engine.py decide --incident eval/E01.json \\
+    python3 engine.py decide --incident eval/E01.json \\
                             --history incidents_history.json \\
                             --actions actions.yaml
 
